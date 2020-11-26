@@ -6,7 +6,7 @@ from .util import (
 )
 
 
-def compare(left_uri, right_uri, ignores=None, ignores_sep=None):
+def compare(left_uri, right_uri, ignores=None, ignores_sep=None, schemas='*'):
     """Compare two databases, given two URIs.
 
     Compare two databases, ignoring whatever is specified in `ignores`.
@@ -84,8 +84,12 @@ def compare(left_uri, right_uri, ignores=None, ignores_sep=None):
 
     left_inspector, right_inspector = _get_inspectors(left_uri, right_uri)
 
+    if schemas == '*':
+        schemas = set(left_inspector.get_schema_names())
+        schemas.update(set(right_inspector.get_schema_names()))
+
     tables_info = _get_tables_info(
-        left_inspector, right_inspector, ignore_manager.ignore_tables)
+        left_inspector, right_inspector, ignore_manager.ignore_tables, schemas)
 
     info = _get_info_dict(left_uri, right_uri, tables_info)
 
@@ -111,10 +115,10 @@ def _get_inspectors(left_uri, right_uri):
     return left_inspector, right_inspector
 
 
-def _get_tables_info(left_inspector, right_inspector, ignore_tables):
+def _get_tables_info(left_inspector, right_inspector, ignore_tables, schemas):
     """Get information about the differences at the table level. """
     tables_left, tables_right = _get_tables(
-        left_inspector, right_inspector, ignore_tables)
+        left_inspector, right_inspector, ignore_tables, schemas)
 
     tables_left_only, tables_right_only = _get_tables_diff(
         tables_left, tables_right)
@@ -126,15 +130,19 @@ def _get_tables_info(left_inspector, right_inspector, ignore_tables):
         right_only=tables_right_only, common=tables_common)
 
 
-def _get_tables(left_inspector, right_inspector, ignore_tables):
+def _get_tables(left_inspector, right_inspector, ignore_tables, schemas):
     """Get table names for both databases. ``ignore_tables`` are removed. """
-    tables_left = _get_tables_names(left_inspector, ignore_tables)
-    tables_right = _get_tables_names(right_inspector, ignore_tables)
+    tables_left = _get_tables_names(left_inspector, ignore_tables, schemas)
+    tables_right = _get_tables_names(right_inspector, ignore_tables, schemas)
     return tables_left, tables_right
 
 
-def _get_tables_names(inspector, ignore_tables):
-    return sorted(set(inspector.get_table_names()) - ignore_tables)
+def _get_tables_names(inspector, ignore_tables, schemas):
+    tables = set()
+    for schema in schemas:
+        tables_for_schema = set(inspector.get_table_names(schema=schema)) - ignore_tables
+        tables.update({f"{schema}.{table}" for table in tables_for_schema})
+    return sorted(tables)
 
 
 def _get_tables_diff(tables_left, tables_right):
@@ -285,8 +293,26 @@ def _get_foreign_keys_info(
     return _diff_dicts(left_fk, right_fk)
 
 
+def table_name_to_schema_and_name(table_name):
+    """
+    >>> table_name_to_schema_and_name('schema.table_name')
+    ('schema', 'table_name')
+    >>> table_name_to_schema_and_name('table_name')
+    (None, 'table_name')
+    """
+    table_with_schema = table_name.split(".", 1)
+    if len(table_with_schema) == 2:
+        schema_name = table_with_schema[0]
+        table = table_with_schema[1]
+    else:
+        schema_name = None
+        table = table_name
+    return schema_name, table
+
+
 def _get_foreign_keys(inspector, table_name):
-    return inspector.get_foreign_keys(table_name)
+    schema, table = table_name_to_schema_and_name(table_name)
+    return inspector.get_foreign_keys(table, schema=schema)
 
 
 def _get_primary_keys_info(
@@ -320,7 +346,8 @@ def _get_primary_keys_info(
 
 
 def _get_primary_keys(inspector, table_name):
-    return inspector.get_pk_constraint(table_name)
+    schema, table = table_name_to_schema_and_name(table_name)
+    return inspector.get_pk_constraint(table, schema=schema)
 
 
 def _get_indexes_info(left_inspector, right_inspector, table_name, ignores):
@@ -338,7 +365,8 @@ def _get_indexes_info(left_inspector, right_inspector, table_name, ignores):
 
 
 def _get_indexes(inspector, table_name):
-    return inspector.get_indexes(table_name)
+    schema, table = table_name_to_schema_and_name(table_name)
+    return inspector.get_indexes(table, schema=schema)
 
 
 def _get_columns_info(left_inspector, right_inspector, table_name, ignores):
@@ -360,7 +388,8 @@ def _get_columns_info(left_inspector, right_inspector, table_name, ignores):
 
 
 def _get_columns(inspector, table_name):
-    return inspector.get_columns(table_name)
+    schema, table = table_name_to_schema_and_name(table_name)
+    return inspector.get_columns(table, schema=schema)
 
 
 def _get_constraints_info(left_inspector, right_inspector,
@@ -384,7 +413,8 @@ def _get_constraints_info(left_inspector, right_inspector,
 
 def _get_constraints_data(inspector, table_name):
     try:
-        return inspector.get_check_constraints(table_name)
+        schema, table = table_name_to_schema_and_name(table_name)
+        return inspector.get_check_constraints(table, schema=schema)
     except (AttributeError, NotImplementedError):  # pragma: no cover
         # sqlalchemy < 1.1.0
         # or a dialect that doesn't implement get_check_constraints
@@ -408,7 +438,7 @@ def _get_enums_info(left_inspector, right_inspector, ignores):
 def _get_enums_data(inspector):
     try:
         # as of 1.2.0, PostgreSQL dialect only; see PGInspector
-        return inspector.get_enums()
+        return inspector.get_enums(schema='*')
     except AttributeError:
         return []
 
